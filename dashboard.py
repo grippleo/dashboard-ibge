@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import requests
+import snowflake.connector
 
 # ── Configuração da página ──────────────────────────────────────────────
 st.set_page_config(
@@ -11,79 +11,40 @@ st.set_page_config(
 )
 
 st.title("🇧🇷 Dashboard - Localidades do Brasil (IBGE)")
-st.markdown("Fonte: **API de Localidades do IBGE** — dados de estados e municípios brasileiros.")
+st.markdown("Fonte: **Data Warehouse Snowflake** — dados extraídos da API de Localidades do IBGE.")
 
 
-# ── Extração de dados ───────────────────────────────────────────────────
+# ── Conexão com Snowflake ───────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def carregar_dados():
-    """
-    Tenta carregar os dados via API do IBGE.
-    Caso a API esteja indisponível, usa o CSV alternativo do GitHub.
-    """
-    try:
-        # 1. Estados
-        url_estados = "https://servicodados.ibge.gov.br/api/v1/localidades/estados"
-        resp_estados = requests.get(url_estados, timeout=10)
-        resp_estados.raise_for_status()
-        estados_json = resp_estados.json()
+    """Carrega dados diretamente do Snowflake."""
+    conn = snowflake.connector.connect(
+        account=st.secrets["snowflake"]["account"],
+        user=st.secrets["snowflake"]["user"],
+        password=st.secrets["snowflake"]["password"],
+        warehouse=st.secrets["snowflake"]["warehouse"],
+        database=st.secrets["snowflake"]["database"],
+        schema=st.secrets["snowflake"]["schema"],
+    )
 
-        df_estados = pd.DataFrame([
-            {
-                "codigo_uf": e["id"],
-                "uf": e["sigla"],
-                "estado": e["nome"],
-                "regiao": e["regiao"]["nome"],
-            }
-            for e in estados_json
-        ])
+    # Consultar estados
+    df_estados = pd.read_sql("SELECT * FROM ESTADOS", conn)
 
-        # 2. Municípios
-        url_municipios = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
-        resp_mun = requests.get(url_municipios, timeout=30)
-        resp_mun.raise_for_status()
-        mun_json = resp_mun.json()
+    # Consultar municípios
+    df_municipios = pd.read_sql("SELECT * FROM MUNICIPIOS", conn)
 
-        df_municipios = pd.DataFrame([
-            {
-                "codigo_ibge": m["id"],
-                "municipio": m["nome"],
-                "codigo_uf": m["microrregiao"]["mesorregiao"]["UF"]["id"],
-                "uf": m["microrregiao"]["mesorregiao"]["UF"]["sigla"],
-                "estado": m["microrregiao"]["mesorregiao"]["UF"]["nome"],
-                "regiao": m["microrregiao"]["mesorregiao"]["UF"]["regiao"]["nome"],
-            }
-            for m in mun_json
-        ])
+    conn.close()
 
-        return df_estados, df_municipios, "API IBGE"
+    # Padronizar nomes das colunas para minúsculo
+    df_estados.columns = [c.lower() for c in df_estados.columns]
+    df_municipios.columns = [c.lower() for c in df_municipios.columns]
 
-    except Exception:
-        # Fallback: CSV do GitHub
-        url_csv = "https://raw.githubusercontent.com/kelvins/municipios-brasileiros/main/csv/municipios.csv"
-        url_estados_csv = "https://raw.githubusercontent.com/kelvins/municipios-brasileiros/main/csv/estados.csv"
-
-        df_municipios = pd.read_csv(url_csv)
-        df_estados = pd.read_csv(url_estados_csv)
-
-        # Padronizar nomes de colunas
-        df_estados = df_estados.rename(columns={"nome": "estado", "codigo_uf": "codigo_uf"})
-        df_municipios = df_municipios.rename(columns={"nome": "municipio"})
-
-        # Juntar região aos municípios
-        df_municipios = df_municipios.merge(
-            df_estados[["codigo_uf", "uf", "estado", "regiao"]],
-            on="codigo_uf",
-            how="left",
-            suffixes=("", "_est"),
-        )
-
-        return df_estados, df_municipios, "CSV GitHub (fallback)"
+    return df_estados, df_municipios
 
 
-df_estados, df_municipios, fonte = carregar_dados()
+df_estados, df_municipios = carregar_dados()
 
-st.caption(f"📡 Fonte dos dados: **{fonte}** | Total de registros: {len(df_municipios):,} municípios")
+st.caption(f"📡 Fonte dos dados: **Snowflake (DB_IBGE)** | Total de registros: {len(df_municipios):,} municípios")
 
 st.divider()
 
@@ -151,7 +112,7 @@ mun_por_estado = (
     .head(10)
     .reset_index(drop=True)
 )
-mun_por_estado.index = mun_por_estado.index + 1  # ranking começando em 1
+mun_por_estado.index = mun_por_estado.index + 1
 mun_por_estado = mun_por_estado.rename(columns={"uf": "UF"})
 
 st.dataframe(mun_por_estado, use_container_width=True)
@@ -160,6 +121,6 @@ st.dataframe(mun_por_estado, use_container_width=True)
 st.divider()
 st.caption(
     "Dashboard desenvolvido como atividade da Aula 1 — "
-    "Pipeline de Dados: API IBGE → Streamlit | "
+    "Pipeline de Dados: API IBGE → Snowflake → Streamlit | "
     "Pós-graduação em Data Science — UNICAMP"
 )
